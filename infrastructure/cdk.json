@@ -1,0 +1,18 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "@aws-cdk/aws-apigateway:usagePlanKeyOrderInsensitiveId": true,
+    "@aws-cdk/core:enableStackNameDuplicates": false,
+    "account": "YOUR_AWS_ACCOUNT_ID",
+    "region": "us-east-1"
+  },
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/__pycache__/**",
+      "**/.venv/**"
+    ]
+  }
+}
