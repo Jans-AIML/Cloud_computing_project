@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, HTTPException, status
 from app.core.database import get_db
 from app.core.logging import logger
 from app.models.schemas import SearchResult
-from app.services.bedrock_client import embed_text
+from app.services.llm_factory import embed_text
 from app.services.rag import hybrid_search
 
 router = APIRouter(prefix="/search", tags=["search"])

@@ -7,7 +7,13 @@ Run this once after RDS is created:
 Or call init_schema() from a Lambda admin endpoint (requires admin credentials).
 """
 
-SCHEMA_SQL = """
+def get_schema_sql(embed_dim: int = 768) -> str:
+    """
+    Returns the full schema DDL with the correct embedding dimension.
+    embed_dim=768  for local Ollama (nomic-embed-text)
+    embed_dim=1536 for AWS Bedrock (Titan Embeddings v2)
+    """
+    return f"""
 -- Enable pgvector
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -24,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sources (
     fetched_at      TIMESTAMPTZ DEFAULT now(),
     consent_flag    BOOLEAN DEFAULT FALSE,  -- TRUE = contributor consented (emails)
     contributor_id  TEXT,                   -- opaque ID (no PII) of the person who uploaded
-    metadata        JSONB DEFAULT '{}'
+    metadata        JSONB DEFAULT '{{}}'
 );
 
 -- ── Documents ─────────────────────────────────────────────────────────────────
@@ -48,11 +54,12 @@ CREATE TABLE IF NOT EXISTS evidence_cards (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     excerpt         TEXT NOT NULL,      -- redacted excerpt (≤ 500 words)
-    topic_tags      TEXT[] DEFAULT '{}',
+    topic_tags      TEXT[] DEFAULT '{{}}',
     date_mentioned  DATE,               -- date referenced in the excerpt (if any)
     citation_url    TEXT,               -- canonical URL
     citation_label  TEXT,               -- "CBC News, Mar 10 2026"
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (document_id)
 );
 
 -- ── Chunks (for RAG retrieval) ────────────────────────────────────────────────
@@ -62,7 +69,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index     INT NOT NULL,
     chunk_text      TEXT NOT NULL,
     token_count     INT,
-    embedding       vector(1536),       -- Titan Embeddings v2 dimension
+    embedding       vector({embed_dim}),       -- dimension set by LLM_PROVIDER
     created_at      TIMESTAMPTZ DEFAULT now(),
     UNIQUE (document_id, chunk_index)
 );
@@ -104,8 +111,10 @@ CREATE TABLE IF NOT EXISTS rag_queries (
 
 def init_schema(conn) -> None:
     """Create all tables if they do not exist."""
+    from app.core.config import get_settings
+    sql = get_schema_sql(embed_dim=get_settings().embed_dim)
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL)
+        cur.execute(sql)
     conn.commit()
 
 

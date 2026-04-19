@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from app.core.database import get_db
 from app.core.logging import logger
 from app.models.schemas import RagRequest, RagResponse
-from app.services.bedrock_client import embed_text, stream_claude
+from app.services.llm_factory import embed_text, stream_llm
 from app.services.rag import hybrid_search, rag_query, _build_context_block, _RAG_SYSTEM_PROMPT
 
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -55,7 +55,7 @@ def stream(payload: RagRequest) -> StreamingResponse:
     user_message = f"Context:\n{context}\n\nQuestion: {payload.question}"
 
     def event_generator():
-        for text_chunk in stream_claude(_RAG_SYSTEM_PROMPT, user_message):
+        for text_chunk in stream_llm(_RAG_SYSTEM_PROMPT, user_message):
             # Server-Sent Events format
             yield f"data: {text_chunk}\n\n"
         yield "data: [DONE]\n\n"

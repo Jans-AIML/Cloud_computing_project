@@ -9,7 +9,7 @@ a pre-signed PUT URL and returns it to the client.
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.database import get_db
 from app.core.logging import logger
@@ -71,13 +71,29 @@ def request_upload(payload: UploadRequest) -> UploadResponse:
                 (document_id, document_id, s3_key),
             )
 
-    # Enqueue ETL job (Glue will pick this up)
+    # Enqueue ETL job (Glue picks this up in production)
     enqueue_etl_job(
         document_id=document_id,
         s3_key=s3_key,
         source_type=payload.source_type,
         consent_flag=payload.consent_given,
     )
+
+    # In local mode, run ETL in-process immediately for URL sources
+    # (PDF sources go through PUT /documents/local-upload/{id} instead)
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+    if _settings.use_local_storage and payload.source_type == "url" and payload.source_url:
+        from app.services.local_etl import run_local_etl
+        with get_db() as conn:
+            run_local_etl(
+                document_id=document_id,
+                s3_key=s3_key,
+                source_type=payload.source_type,
+                consent_flag=payload.consent_given,
+                conn=conn,
+                source_url=str(payload.source_url),
+            )
 
     logger.info("upload_requested", document_id=document_id, source_type=payload.source_type)
     return UploadResponse(
@@ -162,3 +178,70 @@ def delete_document(document_id: str) -> None:
         delete_document_from_s3(bucket=bucket, s3_key=raw_s3_key)
 
     logger.info("document_deleted", document_id=document_id)
+
+
+# ── Local-upload endpoint (development only) ──────────────────────────────────
+
+@router.put("/local-upload/{document_id}", status_code=status.HTTP_200_OK)
+async def local_upload_receive(document_id: str, request: Request) -> dict:
+    """
+    Receives the raw file body via PUT (mirrors the S3 pre-signed URL flow).
+    Only active when USE_LOCAL_STORAGE=true (local development).
+
+    Flow:
+      1. Frontend calls POST /documents/upload → gets URL pointing here
+      2. Frontend PUTs file bytes to this endpoint
+      3. This endpoint saves the file and runs the ETL pipeline in-process
+    """
+    from app.core.config import get_settings
+    from app.services.local_storage import save_file
+
+    settings = get_settings()
+    if not settings.use_local_storage:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Local upload endpoint is only available in local development mode.",
+        )
+
+    # Read the raw file bytes from the request body
+    file_bytes = await request.body()
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file body")
+
+    # Look up the document record to get the s3_key and source metadata
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.raw_s3_key, s.source_type, s.consent_flag
+                FROM documents d
+                JOIN sources s ON s.id = d.source_id
+                WHERE d.id = %s
+                """,
+                (document_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    s3_key = row["raw_s3_key"]
+    source_type = row["source_type"]
+    consent_flag = row["consent_flag"]
+
+    # Save to local filesystem
+    save_file(s3_key, file_bytes)
+    logger.info("local_upload_received", document_id=document_id, bytes=len(file_bytes))
+
+    # Run ETL in-process (no Glue, no SQS — everything happens synchronously here)
+    with get_db() as conn:
+        from app.services.local_etl import run_local_etl
+        run_local_etl(
+            document_id=document_id,
+            s3_key=s3_key,
+            source_type=source_type,
+            consent_flag=consent_flag,
+            conn=conn,
+        )
+
+    return {"status": "processed", "document_id": document_id}

@@ -32,14 +32,17 @@ def generate_upload_url(
     expires_in: int = 900,
 ) -> str:
     """
-    Generate a pre-signed S3 PUT URL.
-    - Emails → private bucket (SSE-KMS encrypted, never publicly accessible).
-    - PDFs/URLs → public-docs bucket.
-    Returns the pre-signed URL string.
+    Generate an upload URL.
+    LOCAL:      Returns a URL pointing to FastAPI's /documents/local-upload/{id}
+    PRODUCTION: Returns a pre-signed S3 PUT URL (expires in `expires_in` seconds).
     """
     settings = get_settings()
 
-    # Emails always go to the private bucket; everything else to public-docs
+    if settings.use_local_storage:
+        from app.services.local_storage import generate_local_upload_url
+        return generate_local_upload_url(document_id)
+
+    # ── Production: S3 pre-signed URL ─────────────────────────────────────────
     bucket = (
         settings.private_bucket
         if source_type == "email"

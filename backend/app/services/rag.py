@@ -17,7 +17,7 @@ from uuid import UUID
 from app.core.config import get_settings
 from app.core.logging import logger
 from app.models.schemas import Citation, RagResponse, SearchResult
-from app.services.bedrock_client import embed_text, invoke_claude, stream_claude
+from app.services.llm_factory import embed_text, invoke_llm, stream_llm
 
 # System prompt enforces citation-first, no hallucination policy
 _RAG_SYSTEM_PROMPT = """You are CEEP, the Community Evidence & Engagement Platform assistant.
@@ -165,8 +165,8 @@ def rag_query(conn, question: str, top_k: int = 6, topic_filter: list[str] | Non
     context = _build_context_block(chunks)
     user_message = f"Context:\n{context}\n\nQuestion: {question}"
 
-    # 4. Call Claude
-    result = invoke_claude(_RAG_SYSTEM_PROMPT, user_message, max_tokens=1024)
+    # 4. Call LLM (Ollama locally, Bedrock in production)
+    result = invoke_llm(_RAG_SYSTEM_PROMPT, user_message, max_tokens=1024)
 
     # 5. Parse structured JSON response
     try:
@@ -218,7 +218,7 @@ def _log_rag_query(conn, **kwargs) -> None:
     sql = """
     INSERT INTO rag_queries
         (question, answer, chunk_ids, model_id, input_tokens, output_tokens, latency_ms)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s::uuid[], %s, %s, %s, %s)
     """
     with conn.cursor() as cur:
         cur.execute(

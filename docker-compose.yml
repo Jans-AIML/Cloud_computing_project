@@ -1,0 +1,35 @@
+version: "3.9"
+
+# Local development stack for CEEP.
+# Replaces: RDS → postgres+pgvector, Bedrock/Glue → Ollama (local LLM)
+#
+# Usage:
+#   docker compose up -d
+#   make setup          # pull Ollama models + init DB schema
+
+services:
+
+  # ── PostgreSQL 15 with pgvector extension ─────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: ceep-db
+    environment:
+      POSTGRES_DB: ceep
+      POSTGRES_USER: ceep_admin
+      POSTGRES_PASSWORD: changeme_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ceep_admin -d ceep"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Ollama is assumed to be installed natively on the host machine.
+  # Start it with: ollama serve
+  # Pull models with: ollama pull llama3.2 && ollama pull nomic-embed-text
+
+volumes:
+  pgdata:

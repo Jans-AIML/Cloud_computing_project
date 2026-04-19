@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # ── Environment ───────────────────────────────────────────────────────────
@@ -40,6 +41,26 @@ class Settings(BaseSettings):
 
     # ── SQS ───────────────────────────────────────────────────────────────────
     ingest_queue_url: str = ""
+
+    # ── LLM provider ─────────────────────────────────────────────────────────
+    # "local"  → Ollama (no AWS needed, free, runs on your machine)
+    # "bedrock" → AWS Bedrock (production)
+    llm_provider: str = "local"
+
+    # ── Ollama (used when llm_provider=local) ─────────────────────────────────
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_chat_model: str = "llama3.2"      # pull with: ollama pull llama3.2
+    ollama_embed_model: str = "nomic-embed-text"  # pull with: ollama pull nomic-embed-text
+
+    # ── Local storage (used when llm_provider=local) ──────────────────────────
+    # When True, files are saved to local_storage_path instead of S3.
+    use_local_storage: bool = True
+    local_storage_path: str = "./local_data"
+
+    # ── Embedding dimension ───────────────────────────────────────────────────
+    # Must match the model: nomic-embed-text=768, Titan Embeddings v2=1536
+    # Set automatically based on provider but can be overridden.
+    embed_dim: int = 768  # 768 for local Ollama; switch to 1536 for Bedrock
 
     # ── Rate limits ───────────────────────────────────────────────────────────
     max_requests_per_minute: int = 20

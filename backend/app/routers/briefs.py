@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from app.core.database import get_db
 from app.core.logging import logger
 from app.models.schemas import BriefRequest, BriefResponse, BriefTemplate, Citation
-from app.services.bedrock_client import embed_text, invoke_claude
+from app.services.llm_factory import embed_text, invoke_llm
 from app.services.rag import hybrid_search, _build_context_block
 
 router = APIRouter(prefix="/briefs", tags=["briefs"])
@@ -98,7 +98,7 @@ def generate_brief(payload: BriefRequest) -> BriefResponse:
         f"Now write the {template.name}."
     )
 
-    result = invoke_claude(system_prompt, user_message, max_tokens=1500, temperature=0.4)
+    result = invoke_llm(system_prompt, user_message, max_tokens=1500, temperature=0.4)
 
     try:
         parsed = json.loads(result["text"])
