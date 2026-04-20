@@ -23,22 +23,30 @@ from app.services.local_storage import read_file, save_file
 # This is a best-effort local substitute. AWS Comprehend is used in production
 # for higher accuracy. For local testing with dummy/public data this is fine.
 
-_PII_PATTERNS = [
-    (re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"), "[REDACTED-NAME]"),              # simple name pattern
+# PII patterns applied to PRIVATE content (emails) only.
+# Public web pages and PDFs skip name redaction — the name regex is too broad
+# and incorrectly redacts school/place names like "Lady Evelyn".
+_PII_PATTERNS_PUBLIC = [
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b"), "[REDACTED-EMAIL]"),
     (re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b"), "[REDACTED-PHONE]"),
     (re.compile(r"\b\d{1,5}\s+\w[\w\s]+(?:Street|St|Ave|Avenue|Road|Rd|Drive|Dr|Blvd|Court|Ct)\b", re.I), "[REDACTED-ADDRESS]"),
 ]
 
+_PII_PATTERNS_PRIVATE = _PII_PATTERNS_PUBLIC + [
+    (re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"), "[REDACTED-NAME]"),  # names in emails only
+]
 
-def _local_pii_scrub(text: str) -> tuple[str, int]:
+
+def _local_pii_scrub(text: str, source_type: str = "url") -> tuple[str, int]:
     """
     Regex-based PII removal.
     Returns (scrubbed_text, redaction_count).
+    Uses stricter patterns for private sources (emails) than public ones (url/pdf).
     NOTE: Less accurate than AWS Comprehend. For local testing only.
     """
+    patterns = _PII_PATTERNS_PRIVATE if source_type == "email" else _PII_PATTERNS_PUBLIC
     count = 0
-    for pattern, replacement in _PII_PATTERNS:
+    for pattern, replacement in patterns:
         matches = pattern.findall(text)
         count += len(matches)
         text = pattern.sub(replacement, text)
@@ -124,8 +132,8 @@ def run_local_etl(
         text = _extract_text(raw_bytes, filename)
     logger.info("local_etl_extracted", document_id=document_id, chars=len(text))
 
-    # 3. PII scrub
-    clean_text, redaction_count = _local_pii_scrub(text)
+    # 3. PII scrub (stricter for emails, lighter for public web/PDF content)
+    clean_text, redaction_count = _local_pii_scrub(text, source_type=source_type)
     logger.info("local_etl_pii_scrub", document_id=document_id, redactions=redaction_count)
 
     # 4. Save clean text to local storage

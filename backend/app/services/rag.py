@@ -169,9 +169,20 @@ def rag_query(conn, question: str, top_k: int = 6, topic_filter: list[str] | Non
     result = invoke_llm(_RAG_SYSTEM_PROMPT, user_message, max_tokens=1024)
 
     # 5. Parse structured JSON response
-    try:
-        parsed = json.loads(result["text"])
-        answer = parsed.get("answer", result["text"])
+    # The LLM sometimes wraps JSON in markdown fences or extra prose — extract robustly.
+    import re as _re
+    raw_text = result["text"]
+    parsed = None
+    # Try direct parse, then extract the first {...} block
+    for candidate in [raw_text, *(_re.findall(r'\{[\s\S]*\}', raw_text))]:
+        try:
+            parsed = json.loads(candidate)
+            break
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    if parsed and isinstance(parsed, dict) and "answer" in parsed:
+        answer = parsed["answer"]
         citations = [
             Citation(
                 label=c.get("label", ""),
@@ -180,9 +191,9 @@ def rag_query(conn, question: str, top_k: int = 6, topic_filter: list[str] | Non
             )
             for c in parsed.get("citations", [])
         ]
-    except (json.JSONDecodeError, KeyError):
+    else:
         # Graceful fallback: return raw text, build citations from retrieved chunks
-        answer = result["text"]
+        answer = raw_text
         citations = [
             Citation(
                 label=c.get("citation_label") or "Source",
