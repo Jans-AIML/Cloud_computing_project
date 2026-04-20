@@ -55,15 +55,16 @@ def _local_pii_scrub(text: str, source_type: str = "url") -> tuple[str, int]:
 
 # ── URL fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_url_text(url: str) -> str:
-    """Fetch a web page and return its visible text."""
+def _fetch_url_text(url: str) -> tuple[str, str]:
+    """Fetch a web page and return (visible_text, page_title)."""
     headers = {"User-Agent": "Mozilla/5.0 (CEEP research bot; educational use)"}
     resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
+    title = (soup.title.string.strip() if soup.title and soup.title.string else "") or url
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
+    return soup.get_text(separator=" ", strip=True), title
 
 
 # ── Text extraction ────────────────────────────────────────────────────────────
@@ -123,13 +124,15 @@ def run_local_etl(
         return
 
     # 2. Get text — fetch from URL or read from local storage
+    page_title: str | None = None
     if source_type == "url" and source_url:
         logger.info("local_etl_fetching_url", document_id=document_id, url=source_url)
-        text = _fetch_url_text(source_url)
+        text, page_title = _fetch_url_text(source_url)
     else:
         raw_bytes = read_file(s3_key)
         filename = Path(s3_key).name
         text = _extract_text(raw_bytes, filename)
+        page_title = filename
     logger.info("local_etl_extracted", document_id=document_id, chars=len(text))
 
     # 3. PII scrub (stricter for emails, lighter for public web/PDF content)
@@ -164,7 +167,7 @@ def run_local_etl(
                 (document_id, i, chunk, token_count, embedding_str),
             )
 
-        # 7. Update document record
+        # 7. Update document record and source title
         snippet = clean_text[:500]
         word_count = len(clean_text.split())
         cur.execute(
@@ -175,15 +178,25 @@ def run_local_etl(
             """,
             (clean_key, snippet, word_count, document_id),
         )
+        if page_title:
+            cur.execute(
+                "UPDATE sources SET title = %s WHERE id = %s AND title IS NULL",
+                (page_title, document_id),
+            )
 
-        # 8. Create/update evidence card
+        # 8. Create/update evidence card with citation metadata
+        citation_label = page_title or source_url or "CEEP Document"
+        citation_url = source_url if source_type == "url" else None
         cur.execute(
             """
-            INSERT INTO evidence_cards (document_id, excerpt)
-            VALUES (%s, %s)
-            ON CONFLICT (document_id) DO UPDATE SET excerpt = EXCLUDED.excerpt
+            INSERT INTO evidence_cards (document_id, excerpt, citation_label, citation_url)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (document_id) DO UPDATE
+                SET excerpt        = EXCLUDED.excerpt,
+                    citation_label = EXCLUDED.citation_label,
+                    citation_url   = EXCLUDED.citation_url
             """,
-            (document_id, snippet),
+            (document_id, snippet, citation_label, citation_url),
         )
 
     conn.commit()

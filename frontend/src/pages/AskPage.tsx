@@ -67,25 +67,35 @@ export default function AskPage() {
               <p className="text-xs font-semibold text-gray-500 mb-3 uppercase tracking-wide">
                 Citations ({response.citations.length})
               </p>
-              <ol className="space-y-2">
-                {response.citations.map((c, i) => (
-                  <li key={i} className="text-sm">
-                    <span className="font-semibold text-blue-700">[{i + 1}] {c.label}</span>
-                    {c.url && (
-                      <a
-                        href={c.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ml-2 text-blue-600 underline text-xs"
-                      >
-                        Source ↗
-                      </a>
-                    )}
-                    {c.excerpt && (
-                      <p className="text-gray-600 text-xs mt-1 italic">"{c.excerpt.slice(0, 200)}…"</p>
-                    )}
-                  </li>
-                ))}
+              <ol className="space-y-3">
+                {response.citations.map((c, i) => {
+                  let hostname = ''
+                  try { hostname = c.url ? new URL(c.url).hostname : '' } catch {}
+                  return (
+                    <li key={i} className="text-sm border-l-2 border-blue-200 pl-3">
+                      <div className="flex items-baseline gap-1 flex-wrap">
+                        <span className="font-semibold text-blue-700 shrink-0">[{i + 1}]</span>
+                        {c.url ? (
+                          <a
+                            href={c.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 underline font-medium break-all"
+                          >
+                            {c.label && c.label !== 'Source' ? c.label : hostname || c.url}
+                          </a>
+                        ) : (
+                          <span className="font-medium text-gray-700">{c.label || 'Source'}</span>
+                        )}
+                      </div>
+                      {c.excerpt && (
+                        <p className="text-gray-500 text-xs mt-1 italic leading-relaxed">
+                          "{c.excerpt.slice(0, 250)}{c.excerpt.length > 250 ? '…' : ''}"
+                        </p>
+                      )}
+                    </li>
+                  )
+                })}
               </ol>
             </div>
           )}

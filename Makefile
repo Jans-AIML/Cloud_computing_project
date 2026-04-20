@@ -43,6 +43,13 @@ clean:
 	docker compose down -v
 	rm -rf backend/local_data
 
+fix-redactions:
+	@echo "Removing false-positive [REDACTED-NAME] tags from public document chunks..."
+	sudo docker exec ceep-db psql -U ceep_admin -d ceep -c \
+		"UPDATE chunks SET chunk_text = regexp_replace(chunk_text, '\[REDACTED-NAME\]\s*', '', 'g') WHERE document_id IN (SELECT d.id FROM documents d JOIN sources s ON s.id = d.source_id WHERE s.source_type IN ('url','pdf')); \
+		 UPDATE evidence_cards SET excerpt = regexp_replace(excerpt, '\[REDACTED-NAME\]\s*', '', 'g') WHERE document_id IN (SELECT d.id FROM documents d JOIN sources s ON s.id = d.source_id WHERE s.source_type IN ('url','pdf'));"
+	@echo "Done. Restart 'make dev' for changes to take effect."
+
 test:
 	cd backend && ../.venv/bin/python -m pytest tests/ -v
 
