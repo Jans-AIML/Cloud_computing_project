@@ -1,7 +1,132 @@
 # Sensitive Data Handling Guide — CEEP
 
-This document describes exactly how CEEP handles private and sensitive information.
-It is intended for project maintainers, contributors, and anyone auditing the platform.
+This document describes how CEEP handles private and sensitive information.
+Intended for project maintainers, contributors, and anyone auditing the platform.
+
+---
+
+## 1. Data Classification
+
+| Classification | Examples | Storage | Queryable? |
+|---|---|---|---|
+| **Private / Sensitive** | Community emails, personal names, contact info | S3 private bucket (SSE-KMS) | Never raw; only PII-scrubbed excerpt |
+| **Semi-public** | OCDSB letters addressed to specific families | S3 private bucket | Scrubbed excerpt only |
+| **Public** | News articles, OCDSB public PDFs, Google Sites content | S3 public-docs bucket | Yes (excerpt + URL) |
+| **Generated** | Evidence cards, briefs, RAG answers | RDS pgvector | Yes |
+
+---
+
+## 2. Consent Flow for Email Submissions
+
+```
+Contributor clicks "Add Evidence" → selects Email
+        │
+        ▼
+UI shows consent checkbox:
+  "I consent to CEEP storing a PII-redacted excerpt of this email
+   as evidence. The original will be kept encrypted and never
+   displayed verbatim. I can request deletion at any time."
+        │
+   ✓ Checked            ✗ Not checked
+        │                      │
+        ▼                      ▼
+ Upload proceeds          Request rejected —
+ (consent_flag=true)      no record created
+```
+
+The `consent_flag` is stored in the `sources` table.
+Without it, `run_local_etl()` exits immediately and no chunks are created.
+
+---
+
+## 3. PII Redaction Pipeline
+
+CEEP uses a **local regex-based scrubber** (no external API).
+Code: `backend/app/services/local_etl.py` — `_local_pii_scrub()`.
+
+### Processing order (emails only)
+
+1. **Safelist protection** — known school / program / place names are token-replaced
+   before any pattern runs, then restored afterwards. This prevents false positives.
+
+2. **PII patterns** (applied in this order to avoid order-dependent bugs):
+
+   | Pattern | Example → Result |
+   |---|---|
+   | `Name <email@domain>` (combined) | `Jane Doe <j@example.com>` → `[REDACTED-NAME] <[REDACTED-EMAIL]>` |
+   | Thread attribution `Name, Month YYYY` | `Jane Smith, Jan 20, 2026` → `[REDACTED-NAME], Jan 20, 2026` |
+   | Standalone email address | `test@example.com` → `[REDACTED-EMAIL]` |
+   | Phone number | `613-555-1234` → `[REDACTED-PHONE]` |
+   | Street address | `123 Elgin Street` → `[REDACTED-ADDRESS]` |
+
+3. **Safelist restoration** — protected terms are put back unchanged.
+
+### Safelist (never redacted, even in emails)
+
+Lady Evelyn, Junior Kindergarten, Senior Kindergarten, Early French Immersion,
+French Immersion, Extended French, Old Ottawa East, Ottawa Carleton, Ottawa Catholic,
+Elgin Street, Churchill Avenue, Henry Munro, District School, School Board,
+and several others — see `_EMAIL_SAFELIST` in `local_etl.py`.
+
+### What is NOT redacted
+
+- Dates and times (they are evidence)
+- URLs and hyperlinks
+- Organization names (OCDSB, Ottawa Citizen, etc.)
+- Names of elected officials acting in their public capacity
+- School names, program names, place names
+
+### Scope
+
+PII scrubbing only applies to **email** (`source_type == "email"`) sources.
+Public PDFs and URLs use a lighter pattern set (email, phone, address only — no name regex).
+
+---
+
+## 4. Storage Security
+
+| Resource | Protection |
+|---|---|
+| Private S3 bucket (`ceep-private-uploads-*`) | SSE-KMS + private ACL, no public access |
+| Public S3 bucket (`ceep-public-docs-*`) | SSE-S3, public read allowed |
+| RDS PostgreSQL | Private VPC subnet, no public endpoint, SSL enforced |
+| Groq API key | AWS Secrets Manager (rotatable) |
+| DB credentials | AWS Secrets Manager |
+
+### Presigned URL security
+- Email uploads use SigV4-signed presigned PUT URLs (required by KMS-encrypted bucket).
+- Browser sends only `Content-Type` — no SSE headers (bucket default handles encryption).
+- URLs expire in 15 minutes.
+
+---
+
+## 5. Right to Deletion
+
+Any contributor can request deletion of their submission:
+
+```
+DELETE /documents/{id}
+```
+
+This triggers:
+1. Soft-delete of the `documents` row (`deleted_at = now()`).
+2. CASCADE delete of all `chunks` rows → embeddings removed from pgvector.
+3. Hard-delete of the raw file from S3 (both public and private buckets).
+
+The `evidence_cards` row is also removed (CASCADE from `documents`).
+After deletion, the document is immediately excluded from all search and RAG queries.
+
+---
+
+## 6. What Colleagues / Testers Need to Know
+
+- **Do not upload real personal emails from real people** unless you have their explicit consent.
+- Test emails should use clearly fictional data (e.g., `test@example.com`, `Jane Test`).
+- The PII scrubber strips names only in specific email-thread contexts — a random novel with
+  "John Smith" in a paragraph would NOT be redacted. The patterns are conservative by design.
+- If you find a false positive or false negative in PII scrubbing, open an issue and include
+  the specific text pattern (anonymised) so it can be added to the safelist or patterns.
+
 
 ---
 

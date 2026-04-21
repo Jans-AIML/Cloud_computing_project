@@ -1,9 +1,8 @@
 {
-  "app": "python3 app.py",
+  "app": "/home/jalzate/Public/GitHub_repos/Cloud_computing_project/.venv/bin/python app.py",
   "context": {
     "@aws-cdk/aws-apigateway:usagePlanKeyOrderInsensitiveId": true,
-    "@aws-cdk/core:enableStackNameDuplicates": false,
-    "account": "YOUR_AWS_ACCOUNT_ID",
+    "account": "563142504525",
     "region": "us-east-1"
   },
   "watch": {

@@ -113,8 +113,11 @@ def hybrid_search(
         (0.7 * combined.vector_score + 0.3 * combined.keyword_score) AS score,
         ec.citation_label,
         ec.citation_url,
-        ec.topic_tags
+        ec.topic_tags,
+        s.source_type
     FROM combined
+    JOIN documents d2 ON d2.id = combined.document_id
+    JOIN sources s ON s.id = d2.source_id
     LEFT JOIN evidence_cards ec ON ec.document_id = combined.document_id
     {topic_clause}
     ORDER BY score DESC

@@ -5,14 +5,14 @@ API Gateway is the SOLE entry point for all client requests.
 Every route (/documents, /search, /rag, /briefs) goes through API GW → Lambda.
 
 Resources created:
-- Lambda security group (allows egress to RDS, Bedrock VPC endpoint)
-- Lambda function (FastAPI app via Mangum, Python 3.12)
-- API Gateway HTTP API with CORS restricted to CloudFront domain
+- Lambda security group (allows egress to RDS)
+- Lambda function (FastAPI app via Mangum, Docker container image)
+- API Gateway HTTP API with CORS
 - IAM role with least-privilege policies:
-    S3 read/write (public-docs), Secrets Manager read, Bedrock InvokeModel,
-    Comprehend DetectPiiEntities, SQS SendMessage
+    S3 read/write, Secrets Manager read (DB + Groq), SQS SendMessage
 """
 
+import aws_cdk as cdk
 from aws_cdk import (
     Stack,
     Duration,
@@ -21,6 +21,7 @@ from aws_cdk import (
     aws_apigatewayv2_integrations as integrations,
     aws_iam as iam,
     aws_ec2 as ec2,
+    aws_ecr_assets as ecr_assets,
     aws_s3 as s3,
     aws_secretsmanager as secretsmanager,
     CfnOutput,
@@ -48,16 +49,14 @@ class ComputeStack(Stack):
             self,
             "CeepLambdaSg",
             vpc=vpc,
-            description="CEEP Lambda SG — egress to RDS and VPC endpoints",
+            description="CEEP Lambda SG - egress to RDS and VPC endpoints",
             allow_all_outbound=True,  # VPC endpoints handle traffic internally
         )
 
-        # Allow Lambda → RDS on PostgreSQL port
-        rds_sg_id = Stack.of(self).format_arn(
-            service="ec2",
-            resource="security-group",
-            resource_name="CeepRdsSg",
-        )
+        # NOTE: RDS SG ingress rule (Lambda → RDS port 5432) was added via CLI:
+        # aws ec2 authorize-security-group-ingress --group-id <rds-sg-id>
+        #   --protocol tcp --port 5432 --source-group <lambda-sg-id>
+        # Cross-stack SG references create cyclic dependencies in CDK.
 
         # ── Lambda Execution Role ─────────────────────────────────────────────
         lambda_role = iam.Role(
@@ -76,23 +75,18 @@ class ComputeStack(Stack):
 
         # S3: read from public-docs, write parsed JSON, read private for pre-signed URL generation
         public_bucket.grant_read_write(lambda_role)
-        private_bucket.grant_put(lambda_role)  # for generating pre-signed upload URLs only
+        # private bucket: put (presigned upload), get (download for /process ETL), delete (right-to-erasure)
+        private_bucket.grant_read_write(lambda_role)
+        private_bucket.grant_delete(lambda_role)
 
         # Secrets Manager: read DB credentials
         db_secret.grant_read(lambda_role)
 
-        # AWS Bedrock: invoke Claude 3 models and Titan Embeddings
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="BedrockInvoke",
-                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-                resources=[
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
-                    f"arn:aws:bedrock:{self.region}::foundation-model/amazon.titan-embed-text-v2:0",
-                ],
-            )
+        # Groq API key secret
+        groq_secret = secretsmanager.Secret.from_secret_name_v2(
+            self, "GroqApiKeySecret", "ceep/groq/api-key"
         )
+        groq_secret.grant_read(lambda_role)
 
         # SQS: send ETL jobs to the queue (ETL stack creates the queue; ARN passed via env)
         lambda_role.add_to_policy(
@@ -113,22 +107,12 @@ class ComputeStack(Stack):
         )
 
         # ── Lambda Function ───────────────────────────────────────────────────
-        self.api_lambda = _lambda.Function(
+        self.api_lambda = _lambda.DockerImageFunction(
             self,
             "CeepApiLambda",
-            function_name="ceep-api",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="app.main.handler",
-            code=_lambda.Code.from_asset(
+            code=_lambda.DockerImageCode.from_image_asset(
                 "../backend",
-                # Exclude dev files to keep the deployment package small
-                exclude=[
-                    "**/__pycache__/**",
-                    "**/.pytest_cache/**",
-                    "**/tests/**",
-                    "Dockerfile",
-                    ".env*",
-                ],
+                platform=ecr_assets.Platform.LINUX_AMD64,
             ),
             role=lambda_role,
             vpc=vpc,
@@ -136,8 +120,8 @@ class ComputeStack(Stack):
                 subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
             ),
             security_groups=[lambda_sg],
-            timeout=Duration.seconds(30),
-            memory_size=512,
+            timeout=Duration.seconds(120),
+            memory_size=1024,
             tracing=_lambda.Tracing.ACTIVE,
             environment={
                 "DB_HOST": db_endpoint,
@@ -147,8 +131,12 @@ class ComputeStack(Stack):
                 "PUBLIC_BUCKET": public_bucket.bucket_name,
                 "PRIVATE_BUCKET": private_bucket.bucket_name,
                 "AWS_REGION_NAME": self.region,
-                "BEDROCK_CLAUDE_MODEL_ID": "anthropic.claude-3-haiku-20240307-v1:0",
-                "BEDROCK_EMBED_MODEL_ID": "amazon.titan-embed-text-v2:0",
+                "GROQ_SECRET_ARN": groq_secret.secret_arn,
+                "GROQ_CHAT_MODEL": "llama-3.1-8b-instant",
+                "LLM_PROVIDER": "groq",
+                "USE_LOCAL_STORAGE": "false",
+                "LOCAL_STORAGE_PATH": "/tmp/ceep_data",
+                "EMBED_DIM": "384",
                 "ENVIRONMENT": "production",
             },
         )
@@ -165,12 +153,11 @@ class ComputeStack(Stack):
             api_name="ceep-api",
             description="CEEP API Gateway — sole entry point for all client requests",
             cors_preflight=apigwv2.CorsPreflightOptions(
-                # Restrict CORS to the CloudFront domain only (set after frontend deploy)
-                # Using "*" temporarily; replace with CloudFront URL before launch
                 allow_origins=["*"],
                 allow_methods=[
                     apigwv2.CorsHttpMethod.GET,
                     apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.PUT,
                     apigwv2.CorsHttpMethod.DELETE,
                     apigwv2.CorsHttpMethod.OPTIONS,
                 ],
@@ -181,7 +168,8 @@ class ComputeStack(Stack):
 
         # Routes — all traffic through API Gateway
         route_configs = [
-            ("POST",   "/documents/upload",      "Upload document (returns pre-signed S3 URL)"),
+            ("POST",   "/documents/upload",        "Upload document (returns pre-signed S3 URL)"),
+            ("POST",   "/documents/{id}/process", "Run ETL in-process after S3 PUT (PDF/email)"),
             ("GET",    "/documents",              "List evidence cards"),
             ("GET",    "/documents/{id}",         "Get single evidence card"),
             ("DELETE", "/documents/{id}",         "Delete document + embeddings"),
@@ -191,6 +179,8 @@ class ComputeStack(Stack):
             ("POST",   "/briefs/generate",        "Generate brief/letter"),
             ("GET",    "/briefs/templates",       "List available templates"),
             ("GET",    "/health",                 "Health check"),
+            ("POST",   "/admin/init-schema",      "One-time DB schema init"),
+            ("POST",   "/admin/reset-schema",     "Drop + recreate all tables"),
         ]
 
         for method_str, path, _ in route_configs:

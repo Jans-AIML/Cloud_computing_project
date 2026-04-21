@@ -8,13 +8,17 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null)
   const [sourceUrl, setSourceUrl] = useState('')
   const [consent, setConsent] = useState(false)
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'uploading' | 'processing' | 'done' | 'error'>('idle')
   const [message, setMessage] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   const handleUpload = async () => {
     if (sourceType !== 'url' && !file) {
       setMessage('Please select a file.')
+      return
+    }
+    if (sourceType === 'url' && !sourceUrl.trim()) {
+      setMessage('Please enter a URL.')
       return
     }
     if (sourceType === 'email' && !consent) {
@@ -34,14 +38,21 @@ export default function UploadPage() {
         consent_given: consent,
       }
 
-      const { upload_url } = await api.requestUpload(uploadReq)
+      const { document_id, upload_url } = await api.requestUpload(uploadReq)
 
       if (file) {
         await api.uploadFileToS3(upload_url, file)
       }
 
+      // For PDF and email sources, trigger in-process ETL now that the file is in S3
+      if (sourceType === 'pdf' || sourceType === 'email') {
+        setStatus('processing')
+        setMessage('Processing document…')
+        await api.processDocument(document_id)
+      }
+
       setStatus('done')
-      setMessage('Document submitted! It will appear in the corpus once processing completes (usually 1–2 minutes).')
+      setMessage('Document submitted and processed! It is now searchable in the corpus.')
       setFile(null)
       if (fileRef.current) fileRef.current.value = ''
     } catch (err: unknown) {
@@ -129,7 +140,7 @@ export default function UploadPage() {
         disabled={status === 'uploading'}
         className="bg-blue-700 text-white px-6 py-2 rounded font-medium hover:bg-blue-800 disabled:opacity-50 transition-colors"
       >
-        {status === 'uploading' ? 'Uploading…' : 'Submit'}
+        {status === 'uploading' ? 'Uploading…' : status === 'processing' ? 'Processing…' : 'Submit'}
       </button>
 
       {message && (

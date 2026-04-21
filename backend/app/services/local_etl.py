@@ -14,6 +14,10 @@ from pathlib import Path
 import httpx
 from bs4 import BeautifulSoup
 
+
+class UrlFetchError(Exception):
+    """Raised when a URL cannot be fetched (non-200, timeout, DNS failure, etc.)."""
+
 from app.core.config import get_settings
 from app.core.logging import logger
 from app.services.llm_factory import embed_text
@@ -24,16 +28,50 @@ from app.services.local_storage import read_file, save_file
 # for higher accuracy. For local testing with dummy/public data this is fine.
 
 # PII patterns applied to PRIVATE content (emails) only.
-# Public web pages and PDFs skip name redaction — the name regex is too broad
-# and incorrectly redacts school/place names like "Lady Evelyn".
 _PII_PATTERNS_PUBLIC = [
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b"), "[REDACTED-EMAIL]"),
     (re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b"), "[REDACTED-PHONE]"),
     (re.compile(r"\b\d{1,5}\s+\w[\w\s]+(?:Street|St|Ave|Avenue|Road|Rd|Drive|Dr|Blvd|Court|Ct)\b", re.I), "[REDACTED-ADDRESS]"),
 ]
 
-_PII_PATTERNS_PRIVATE = _PII_PATTERNS_PUBLIC + [
-    (re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"), "[REDACTED-NAME]"),  # names in emails only
+# Targeted name patterns for emails — only catch names in clearly-personal contexts,
+# avoiding the broad two-word title-case match that falsely redacts school/program names.
+# IMPORTANT: the combined Name+email pattern must run BEFORE _PII_PATTERNS_PUBLIC so the
+# email address hasn't been redacted yet when we try to match "Name <email>".
+_PII_PATTERNS_PRIVATE = [
+    # "Jane Doe <jane@example.com>" — combined replacement before standalone email scrub
+    (re.compile(r'\b[A-Z][a-z]+(?: [A-Z][a-z]+)?\b\s*<[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}>'), '[REDACTED-NAME] <[REDACTED-EMAIL]>'),
+    # Email thread timestamp attribution: "Jane Smith, Jan 20, 2026 at 10:27"
+    (re.compile(r'\b[A-Z][a-z]+ [A-Z][a-z]+(?=,\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s,.])'), '[REDACTED-NAME]'),
+] + _PII_PATTERNS_PUBLIC
+
+# Known school, program, and place names that must never be redacted from emails.
+# These are protected before PII scrubbing and restored afterwards.
+_EMAIL_SAFELIST: list[str] = [
+    "Lady Evelyn",
+    "Junior Kindergarten",
+    "Senior Kindergarten",
+    "Early French Immersion",
+    "French Immersion",
+    "Extended French",
+    "Old Ottawa East",
+    "Old Ottawa",
+    "Ottawa East",
+    "Ottawa Carleton",
+    "Ottawa-Carleton",
+    "Ottawa Catholic",
+    "Ottawa River",
+    "Elgin Street",
+    "Churchill Avenue",
+    "Henry Munro",
+    "Heritage Public",
+    "Hopewell Avenue",
+    "Hilson Avenue",
+    "Huntley Centennial",
+    "Larsen Elementary",
+    "District School",
+    "Public School",
+    "School Board",
 ]
 
 
@@ -45,11 +83,31 @@ def _local_pii_scrub(text: str, source_type: str = "url") -> tuple[str, int]:
     NOTE: Less accurate than AWS Comprehend. For local testing only.
     """
     patterns = _PII_PATTERNS_PRIVATE if source_type == "email" else _PII_PATTERNS_PUBLIC
+
+    # For emails: protect known school/program/place names so they survive PII scrubbing.
+    # Each occurrence is stored in order and replaced with a unique token.
+    saved: list[str] = []
+    if source_type == "email":
+        for term in _EMAIL_SAFELIST:
+            pat = re.compile(re.escape(term), re.IGNORECASE)
+
+            def _repl(m: re.Match, _saved: list = saved) -> str:  # noqa: B023
+                idx = len(_saved)
+                _saved.append(m.group(0))  # preserve original casing
+                return f"__SAFE{idx}__"
+
+            text = pat.sub(_repl, text)
+
     count = 0
     for pattern, replacement in patterns:
         matches = pattern.findall(text)
         count += len(matches)
         text = pattern.sub(replacement, text)
+
+    # Restore protected terms in the order they were saved
+    for i, original in enumerate(saved):
+        text = text.replace(f"__SAFE{i}__", original)
+
     return text, count
 
 
@@ -57,21 +115,114 @@ def _local_pii_scrub(text: str, source_type: str = "url") -> tuple[str, int]:
 
 def _fetch_url_text(url: str) -> tuple[str, str]:
     """Fetch a web page and return (visible_text, page_title)."""
-    headers = {"User-Agent": "Mozilla/5.0 (CEEP research bot; educational use)"}
-    resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=30)
-    resp.raise_for_status()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-CA,en;q=0.5",
+    }
+    try:
+        resp = httpx.get(url, headers=headers, follow_redirects=True, timeout=30)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise UrlFetchError(
+            f"URL returned {exc.response.status_code}: {url}"
+        ) from exc
+    except httpx.TimeoutException:
+        raise UrlFetchError(f"URL timed out after 30 s: {url}")
+    except httpx.RequestError as exc:
+        raise UrlFetchError(f"Could not reach URL ({type(exc).__name__}): {url}") from exc
     soup = BeautifulSoup(resp.text, "html.parser")
     title = (soup.title.string.strip() if soup.title and soup.title.string else "") or url
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
-    return soup.get_text(separator=" ", strip=True), title
+    text = soup.get_text(separator=" ", strip=True)
+    if len(text.split()) < 20:
+        raise UrlFetchError(
+            f"URL returned too little extractable text (possible JavaScript-only page or bot block): {url}"
+        )
+    return text, title
 
 
 # ── Text extraction ────────────────────────────────────────────────────────────
 
+def _extract_email_text(file_bytes: bytes) -> tuple[str, str]:
+    """
+    Parse a MIME .eml file and return (body_text, subject).
+    Handles quoted-printable and base64 transfer encodings automatically
+    via the ``email.policy.default`` policy (Python 3.6+).
+    Strips all routing headers, MIME boundaries, and metadata.
+    Only Subject, Date, and the message body are included in body_text.
+    """
+    import email as _email_lib
+    from email import policy as _email_policy
+
+    msg = _email_lib.message_from_bytes(file_bytes, policy=_email_policy.default)
+
+    parts: list[str] = []
+
+    subject = msg.get("Subject", "")
+    if subject:
+        parts.append(f"Subject: {subject}")
+
+    date_val = msg.get("Date", "")
+    if date_val:
+        parts.append(f"Date: {date_val}")
+
+    body = ""
+
+    def _get_text_from_part(part) -> str:  # type: ignore[no-untyped-def]
+        try:
+            return part.get_content() or ""
+        except Exception:
+            # Fallback: decode payload manually
+            raw = part.get_payload(decode=True)
+            if not raw:
+                return ""
+            charset = part.get_content_charset() or "utf-8"
+            return raw.decode(charset, errors="replace")
+
+    if msg.is_multipart():
+        # Prefer text/plain; fall back to text/html
+        html_fallback = ""
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if "attachment" in cd:
+                continue
+            if ct == "text/plain":
+                candidate = _get_text_from_part(part).strip()
+                if candidate:
+                    body = candidate
+                    break
+            elif ct == "text/html" and not html_fallback:
+                html_fallback = BeautifulSoup(
+                    _get_text_from_part(part), "html.parser"
+                ).get_text(separator=" ", strip=True)
+        if not body and html_fallback:
+            body = html_fallback
+    else:
+        ct = msg.get_content_type()
+        if ct == "text/plain":
+            body = _get_text_from_part(msg).strip()
+        elif ct == "text/html":
+            body = BeautifulSoup(
+                _get_text_from_part(msg), "html.parser"
+            ).get_text(separator=" ", strip=True)
+
+    if body:
+        parts.append(body)
+
+    result = "\n\n".join(parts).strip()
+    if not result:
+        # Last resort: raw decode
+        return file_bytes.decode("utf-8", errors="replace"), subject
+    return result, subject
+
+
 def _extract_text(file_bytes: bytes, filename: str) -> str:
-    """Extract plain text from uploaded bytes."""
-    if filename.lower().endswith(".pdf"):
+    """Extract plain text from uploaded bytes (discards email subject metadata)."""
+    name_lower = filename.lower()
+    if name_lower.endswith(".pdf"):
         try:
             from pdfminer.high_level import extract_text
             import io
@@ -79,7 +230,10 @@ def _extract_text(file_bytes: bytes, filename: str) -> str:
         except ImportError:
             logger.warning("pdfminer_not_installed_falling_back_to_decode")
             return file_bytes.decode("latin-1", errors="replace")
-    # Plain text / email
+    if name_lower.endswith(".eml"):
+        body, _subject = _extract_email_text(file_bytes)
+        return body
+    # Plain text
     for enc in ("utf-8", "latin-1"):
         try:
             return file_bytes.decode(enc)
@@ -109,6 +263,7 @@ def run_local_etl(
     consent_flag: bool,
     conn,
     source_url: str | None = None,
+    file_bytes: bytes | None = None,
 ) -> None:
     """
     Run the full ETL pipeline in-process.
@@ -129,10 +284,15 @@ def run_local_etl(
         logger.info("local_etl_fetching_url", document_id=document_id, url=source_url)
         text, page_title = _fetch_url_text(source_url)
     else:
-        raw_bytes = read_file(s3_key)
+        raw_bytes = file_bytes if file_bytes is not None else read_file(s3_key)
         filename = Path(s3_key).name
-        text = _extract_text(raw_bytes, filename)
-        page_title = filename
+        if filename.lower().endswith(".eml"):
+            # Use the email Subject as the human-readable title
+            text, email_subject = _extract_email_text(raw_bytes)
+            page_title = email_subject.strip() or filename
+        else:
+            text = _extract_text(raw_bytes, filename)
+            page_title = filename
     logger.info("local_etl_extracted", document_id=document_id, chars=len(text))
 
     # 3. PII scrub (stricter for emails, lighter for public web/PDF content)
@@ -180,7 +340,7 @@ def run_local_etl(
         )
         if page_title:
             cur.execute(
-                "UPDATE sources SET title = %s WHERE id = %s AND title IS NULL",
+                "UPDATE sources SET title = %s WHERE id = %s",
                 (page_title, document_id),
             )
 

@@ -22,8 +22,8 @@ from stacks.frontend_stack import FrontendStack
 app = cdk.App()
 
 env = cdk.Environment(
-    account=app.node.try_get_context("account"),
-    region=app.node.try_get_context("region") or "us-east-1",
+    account="563142504525",
+    region="us-east-1",
 )
 
 storage = StorageStack(app, "CeepStorageStack", env=env)

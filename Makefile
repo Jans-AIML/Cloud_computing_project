@@ -1,4 +1,4 @@
-.PHONY: start setup dev frontend stop clean test
+.PHONY: start setup dev frontend stop clean test bootstrap deploy-infra deploy-frontend deploy-all destroy-infra fix-redactions
 
 # ── Local development commands ─────────────────────────────────────────────────
 
@@ -59,8 +59,22 @@ seed:
 
 # ── AWS deployment commands ────────────────────────────────────────────────────
 
+bootstrap:
+	@echo "Bootstrapping CDK in us-east-1 (one-time setup)..."
+	cd infrastructure && cdk bootstrap aws://563142504525/us-east-1
+
 deploy-infra:
-	cd infrastructure && cdk deploy --all --require-approval never
+	@echo "Deploying StorageStack + ComputeStack + EtlStack + FrontendStack..."
+	cd infrastructure && cdk deploy --all --require-approval never --outputs-file ../cdk-outputs.json
+
+deploy-frontend:
+	@echo "Building and uploading React frontend to S3..."
+	cd frontend && npm run build
+	aws s3 sync frontend/dist/assets s3://ceep-frontend-563142504525/assets/ \
+		--delete --cache-control "public, max-age=31536000, immutable" --quiet
+	aws s3 cp frontend/dist/index.html s3://ceep-frontend-563142504525/index.html \
+		--cache-control "no-cache, no-store, must-revalidate"
+	@echo "Frontend deployed."
 
 deploy-all:
 	bash scripts/deploy.sh

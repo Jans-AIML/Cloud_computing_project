@@ -54,12 +54,14 @@ export interface SearchResult {
   citation_label: string | null
   citation_url: string | null
   topic_tags: string[]
+  source_type: string | null
 }
 
 export interface Citation {
   label: string
   url: string | null
   excerpt: string
+  source_type?: string | null
 }
 
 export interface RagResponse {
@@ -117,6 +119,9 @@ export const api = {
 
   deleteDocument: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
+
+  processDocument: (id: string) =>
+    request<{ document_id: string; status: string }>(`/documents/${id}/process`, { method: 'POST' }),
 
   // Search
   search: (q: string, topK = 8, topics: string[] = []) => {

@@ -8,9 +8,206 @@ Group 1: Jans Alzate-Morales (c0936855) · Yash Suthar (c0957228) · Nafis Ahmed
 ## What is CEEP?
 
 A cloud-native, LLM-assisted web application to ingest, analyse, and mobilise community
-evidence for keeping Lady Evelyn and other Ottawa community schools open.  
-It ingests PDFs, emails (with PII redaction), and public web pages; turns them into citable
-*evidence cards*; and drives a RAG-backed Q&A and brief-generation interface.
+evidence for keeping Lady Evelyn and other Ottawa community schools open.
+
+It ingests **PDFs**, **emails** (with PII redaction), and **public web pages**; turns them into
+citable *evidence cards*; and drives a hybrid-search Q&A and brief-generation interface backed
+by a Retrieval-Augmented Generation (RAG) pipeline.
+
+**Live URL:** <https://d3voaboc02j1x3.cloudfront.net>
+
+---
+
+## Deployed Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Tier 1 — Frontend                                          │
+│  CloudFront CDN  ←→  React + Vite SPA (hosted on S3)       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ HTTPS
+┌──────────────────────────▼──────────────────────────────────┐
+│  Tier 2 — Backend                                           │
+│                                                             │
+│  API Gateway (HTTP API)                                     │
+│    https://rrzjd3hm7l.execute-api.us-east-1.amazonaws.com  │
+│       ├── /documents/*   → Lambda (FastAPI / Mangum)        │
+│       ├── /search        → Lambda                           │
+│       ├── /rag           → Lambda                           │
+│       └── /briefs/*      → Lambda                           │
+│                                                             │
+│  Upload flow (PDF / email):                                 │
+│   Lambda generates pre-signed S3 PUT URL                   │
+│   → browser PUTs file directly to S3                       │
+│   → browser calls POST /documents/{id}/process             │
+│   → Lambda downloads file, runs ETL in-process             │
+│                                                             │
+│  Upload flow (URL):                                         │
+│   Lambda fetches page, runs ETL atomically inside           │
+│   the same DB transaction (no orphan records on failure)   │
+│                                                             │
+│  ETL Pipeline (in-process, inside Lambda):                  │
+│   Extract text (pdfminer / MIME parse / httpx+BeautifulSoup)│
+│   → PII scrub (regex + safelist)                           │
+│   → Chunk (300 words, 50 overlap)                          │
+│   → Embed (fastembed BAAI/bge-small-en-v1.5, 384-dim)     │
+│   → Load (RDS pgvector)                                    │
+│                                                             │
+│  Chat / RAG:  Groq API → llama-3.1-8b-instant              │
+│  Embeddings:  fastembed (ONNX, runs inside Lambda)         │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ SQL + pgvector queries
+┌──────────────────────────▼──────────────────────────────────┐
+│  Tier 3 — Data / Storage                                    │
+│  S3 public bucket  — PDFs, URL content                     │
+│  S3 private bucket — emails (SSE-KMS encrypted)            │
+│  RDS PostgreSQL 15 + pgvector  — embeddings, evidence cards │
+│  Secrets Manager  — DB credentials, Groq API key           │
+│  KMS  — private bucket encryption                          │
+│  CloudWatch  — Lambda logs                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## AWS Resources (us-east-1)
+
+| Resource | Name / ID |
+|---|---|
+| CloudFront distribution | `E2V5EZNC31X6NU` |
+| API Gateway | `rrzjd3hm7l` |
+| Lambda function | `CeepComputeStack-CeepApiLambdaE91D0423-Y8QlvXhUWuQg` |
+| ECR repository | `cdk-hnb659fds-container-assets-563142504525-us-east-1` |
+| RDS instance | `ceepstoragestack-ceeppostgres…` (private VPC) |
+| Public S3 bucket | `ceep-public-docs-563142504525` |
+| Private S3 bucket | `ceep-private-uploads-563142504525` |
+| Frontend S3 bucket | `ceep-frontend-563142504525` |
+| Lambda IAM role | `CeepComputeStack-CeepLambdaRole0BADAA4D-toos8uG0hdi1` |
+
+---
+
+## Technology Stack
+
+| Layer | Technology | Notes |
+|---|---|---|
+| Frontend | React 18 + Vite + TypeScript + Tailwind CSS | |
+| CDN | CloudFront | HTTPS, edge caching |
+| API | API Gateway HTTP API | Sole entry point |
+| Compute | AWS Lambda (Docker container) + FastAPI + Mangum | Docker required for ONNX runtime |
+| ETL | In-process Python (pdfminer, email stdlib, httpx, BeautifulSoup) | Runs inside Lambda |
+| PII scrub | Regex + safelist (local, no Comprehend) | See `local_etl.py` |
+| Chat LLM | Groq API — `llama-3.1-8b-instant` | |
+| Embeddings | fastembed — `BAAI/bge-small-en-v1.5` (384-dim) | Pre-baked in Docker image |
+| Vector DB | RDS PostgreSQL 15 + pgvector | Hybrid: dense + BM25 keyword |
+| Object Store | S3 (2 buckets: public-docs, private-uploads) | |
+| Secrets | AWS Secrets Manager + KMS | Groq key, DB creds |
+| IaC | AWS CDK (Python) | |
+
+---
+
+## Working Features
+
+| Feature | Status |
+|---|---|
+| PDF upload → chunked + embedded → searchable | ✅ |
+| URL bookmarking → fetch → chunked + embedded | ✅ |
+| Email (.eml) upload → MIME parse → PII redact → searchable | ✅ |
+| Hybrid vector + BM25 keyword search | ✅ |
+| RAG Q&A with inline citations | ✅ |
+| Brief/letter generator (4 templates) | ✅ |
+| Source-type badges (PDF / Web / Email) in search results | ✅ |
+| Evidence deduplication by document in brief generator | ✅ |
+| Right-to-deletion (soft-delete + S3 purge) | ✅ |
+
+---
+
+## Sensitive Data Policy
+
+### Email submissions
+- Raw files land in `ceep-private-uploads-563142504525` — **SSE-KMS encrypted**.
+- **Consent gate**: contributor must check an explicit opt-in before any content is processed.
+- PII scrub runs before chunking using regex patterns + a safelist of known school/program names.
+- Patterns caught: email addresses, phone numbers, street addresses, personal names
+  (only in clearly-personal contexts: `Name <email>`, `Name, Jan 20 2026 at …`).
+- Safelisted (never redacted): Lady Evelyn, Junior Kindergarten, French Immersion, Ottawa Carleton, etc.
+- Only the **redacted excerpt** is chunked and embedded; the raw `.eml` is kept encrypted.
+- Authors may request deletion at any time: `DELETE /documents/{id}`.
+
+### Public documents
+- Excerpts ≤ 500 words per source, always with attribution.
+- OCDSB official PDFs treated as public-domain government documents.
+
+---
+
+## Repository Structure
+
+```
+.
+├── infrastructure/          # AWS CDK (Python)
+│   ├── app.py
+│   └── stacks/
+│       ├── storage_stack.py   # S3, RDS, KMS, VPC
+│       ├── compute_stack.py   # Lambda (Docker), API Gateway
+│       ├── etl_stack.py       # (legacy Glue stubs, not active)
+│       └── frontend_stack.py  # CloudFront + S3 frontend bucket
+├── backend/                 # FastAPI app (Lambda handler via Mangum)
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── routers/         # documents, search, rag, briefs
+│   │   ├── services/        # local_etl, rag, llm_factory, groq_client,
+│   │   │                    #   fastembed_client, storage
+│   │   ├── models/          # Pydantic schemas
+│   │   └── core/            # config, database, logging
+│   ├── Dockerfile           # linux/amd64 — pre-bakes fastembed model
+│   └── requirements.txt
+├── frontend/                # React + Vite SPA
+│   ├── src/
+│   │   ├── pages/           # SearchPage, AskPage, WritePage, UploadPage
+│   │   └── services/api.ts  # typed API client
+│   └── package.json
+├── docs/
+│   ├── developer_guide.md   # ← START HERE (Nafis / Yash)
+│   ├── community_guide.md   # plain-language guide for non-technical users
+│   └── sensitive_data_guide.md
+├── scripts/
+│   └── deploy.sh            # legacy full-CDK deploy (see developer_guide for current flow)
+├── .env.example
+├── docker-compose.yml       # local dev: PostgreSQL + pgvector
+└── Makefile
+```
+
+---
+
+## Quick-start (local development)
+
+See **[docs/developer_guide.md](docs/developer_guide.md)** for the full guide.
+
+```bash
+# 1. Clone
+git clone https://github.com/Jans-AIML/Cloud_computing_project.git
+cd Cloud_computing_project
+
+# 2. Python env
+python -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+
+# 3. Local PostgreSQL with pgvector
+docker compose up -d
+
+# 4. Copy and edit .env
+cp .env.example backend/.env
+# Edit backend/.env: set LLM_PROVIDER=groq, add GROQ_API_KEY
+
+# 5. Init DB schema
+cd backend && python -m app.core.schema
+
+# 6. Start backend
+make dev       # → http://localhost:8001  (Swagger: /docs)
+
+# 7. Start frontend (new terminal)
+make frontend  # → http://localhost:5173
+```
+
 
 ---
 

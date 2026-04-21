@@ -40,13 +40,37 @@ class StorageStack(Stack):
         )
 
         # ── VPC ───────────────────────────────────────────────────────────────
-        # Two private subnets (Lambda + RDS) and two public subnets (NAT GW).
-        # We keep RDS and Lambda off the public internet entirely.
+        # Two private subnets (Lambda + RDS) and two public subnets.
+        # NAT instance (t3.nano ~$3/mo) instead of NAT Gateway (~$32/mo).
         self.vpc = ec2.Vpc(
             self,
             "CeepVpc",
             max_azs=2,
-            nat_gateways=1,  # one NAT saves cost on free tier
+            nat_gateways=0,  # we add a NAT instance below to save cost
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                ),
+                ec2.SubnetConfiguration(
+                    name="Private",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24,
+                ),
+            ],
+        )
+
+        # Cheap NAT instance (t3.nano ≈ $3/mo) instead of managed NAT GW (~$32/mo)
+        nat_instance = ec2.NatProvider.instance_v2(
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.NANO),
+        )
+        self.vpc = ec2.Vpc(
+            self,
+            "CeepVpcWithNat",
+            max_azs=2,
+            nat_gateways=1,
+            nat_gateway_provider=nat_instance,
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="Public",

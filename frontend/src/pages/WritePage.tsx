@@ -1,6 +1,56 @@
 import { useState, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { api, BriefTemplate, BriefResponse } from '../services/api'
+import { api, BriefTemplate, BriefResponse, Citation } from '../services/api'
+
+const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
+  pdf:   { label: 'PDF',   cls: 'bg-orange-100 text-orange-700' },
+  url:   { label: 'Web',   cls: 'bg-green-100  text-green-700'  },
+  email: { label: 'Email', cls: 'bg-purple-100 text-purple-700' },
+}
+
+function SourceTypeBadge({ type }: { type?: string | null }) {
+  const badge = SOURCE_BADGE[type ?? ''] ?? { label: 'Doc', cls: 'bg-gray-100 text-gray-600' }
+  return (
+    <span className={`text-xs font-semibold px-2 py-0.5 rounded shrink-0 ${badge.cls}`}>
+      {badge.label}
+    </span>
+  )
+}
+
+function FootnoteItem({ index, footnote }: { index: number; footnote: Citation }) {
+  const [expanded, setExpanded] = useState(false)
+  const MAX = 180
+  const long = footnote.excerpt.length > MAX
+  const excerpt = expanded || !long ? footnote.excerpt : footnote.excerpt.slice(0, MAX) + '…'
+
+  return (
+    <li className="border rounded p-3 bg-white text-sm">
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <span className="font-mono text-xs text-gray-400 shrink-0">[{index}]</span>
+        <SourceTypeBadge type={footnote.source_type} />
+        {footnote.url ? (
+          <a href={footnote.url} target="_blank" rel="noopener noreferrer"
+            className="font-medium text-blue-700 hover:underline truncate">
+            {footnote.label}
+          </a>
+        ) : (
+          <span className="font-medium text-gray-700 truncate">{footnote.label}</span>
+        )}
+      </div>
+      {footnote.excerpt && (
+        <div className="mt-1 text-xs text-gray-500 leading-relaxed">
+          <span className="italic">"{excerpt}"</span>
+          {long && (
+            <button onClick={() => setExpanded(!expanded)}
+              className="ml-1 text-blue-500 hover:underline not-italic">
+              {expanded ? 'less' : 'more'}
+            </button>
+          )}
+        </div>
+      )}
+    </li>
+  )
+}
 
 export default function WritePage() {
   const [templates, setTemplates] = useState<BriefTemplate[]>([])
@@ -131,7 +181,7 @@ export default function WritePage() {
                 onClick={() => navigator.clipboard.writeText(result.draft)}
                 className="text-xs text-blue-600 hover:underline"
               >
-                Copy to clipboard
+                Copy draft
               </button>
             </div>
             <div className="prose prose-sm max-w-none text-gray-800">
@@ -141,15 +191,15 @@ export default function WritePage() {
 
           {result.footnotes.length > 0 && (
             <div className="p-4 bg-gray-50 rounded border">
-              <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
-                Evidence Footnotes
+              <p className="text-xs font-semibold text-gray-500 mb-3 uppercase tracking-wide">
+                Sources consulted ({result.footnotes.length})
               </p>
-              <ol className="space-y-1">
+              <p className="text-xs text-gray-400 mb-3">
+                Inline markers [1]…[{result.footnotes.length}] in the draft refer to these sources in order.
+              </p>
+              <ol className="space-y-2">
                 {result.footnotes.map((f, i) => (
-                  <li key={i} className="text-xs text-gray-600">
-                    [{i + 1}] {f.label}{' '}
-                    {f.url && <a href={f.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">↗</a>}
-                  </li>
+                  <FootnoteItem key={i} index={i + 1} footnote={f} />
                 ))}
               </ol>
             </div>

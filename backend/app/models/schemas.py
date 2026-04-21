@@ -79,6 +79,7 @@ class SearchResult(BaseModel):
     citation_label: str | None
     citation_url: str | None
     topic_tags: list[str] = []
+    source_type: str | None = None
 
 
 # ── RAG ───────────────────────────────────────────────────────────────────────
@@ -93,6 +94,7 @@ class Citation(BaseModel):
     label: str
     url: str | None
     excerpt: str
+    source_type: str | None = None
 
 
 class RagResponse(BaseModel):

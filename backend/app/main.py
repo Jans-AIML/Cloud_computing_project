@@ -47,6 +47,47 @@ def health():
     return {"status": "ok", "environment": settings.environment}
 
 
+# ── Admin: DB schema init (called once after first deploy) ────────────────────
+@app.post("/admin/init-schema", tags=["ops"])
+def init_schema_endpoint():
+    """Initialise pgvector schema. Safe to call multiple times (CREATE IF NOT EXISTS)."""
+    if settings.environment == "production":
+        from app.core.schema import init_schema as _init
+        from app.core.database import get_connection
+        conn = get_connection()
+        try:
+            _init(conn)
+        finally:
+            conn.close()
+        return {"status": "schema initialised"}
+    return {"status": "skipped (not production)"}
+
+
+@app.post("/admin/reset-schema", tags=["ops"])
+def reset_schema_endpoint():
+    """Drop and recreate all tables. Use after changing embed_dim. Data will be lost."""
+    if settings.environment == "production":
+        from app.core.schema import init_schema as _init
+        from app.core.database import get_connection
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DROP TABLE IF EXISTS rag_queries CASCADE;
+                    DROP TABLE IF EXISTS pii_audit CASCADE;
+                    DROP TABLE IF EXISTS chunks CASCADE;
+                    DROP TABLE IF EXISTS evidence_cards CASCADE;
+                    DROP TABLE IF EXISTS documents CASCADE;
+                    DROP TABLE IF EXISTS sources CASCADE;
+                """)
+            conn.commit()
+            _init(conn)
+        finally:
+            conn.close()
+        return {"status": "schema reset and reinitialised"}
+    return {"status": "skipped (not production)"}
+
+
 # ── Global error handler ──────────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

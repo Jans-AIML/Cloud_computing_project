@@ -10,6 +10,7 @@ import json
 import uuid
 
 import boto3
+from botocore.client import Config
 from botocore.exceptions import ClientError
 
 from app.core.config import get_settings
@@ -17,7 +18,11 @@ from app.core.logging import logger
 
 
 def _s3_client():
-    return boto3.client("s3", region_name=get_settings().aws_region_name)
+    return boto3.client(
+        "s3",
+        region_name=get_settings().aws_region_name,
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def _sqs_client():
@@ -60,8 +65,11 @@ def generate_upload_url(
                 "Bucket": bucket,
                 "Key": s3_key,
                 "ContentType": content_type,
-                # Server-side encryption parameters
-                "ServerSideEncryption": "aws:kms" if source_type == "email" else "AES256",
+                # SSE is enforced at bucket level (default encryption) so we
+                # don't include it as a signed parameter — that would require
+                # the browser to send the matching x-amz-server-side-encryption
+                # header, which cross-origin fetch cannot do without exposing it
+                # in CORS and the pre-signed URL becomes unusable from a browser.
             },
             ExpiresIn=expires_in,
         )
@@ -103,6 +111,17 @@ def enqueue_etl_job(document_id: str, s3_key: str, source_type: str, consent_fla
         MessageGroupId="ceep-ingest",  # for FIFO queue; ignored for standard
     )
     logger.info("etl_job_enqueued", document_id=document_id)
+
+
+def download_from_s3(bucket: str, s3_key: str) -> bytes:
+    """Download an object from S3 and return its raw bytes."""
+    client = _s3_client()
+    try:
+        response = client.get_object(Bucket=bucket, Key=s3_key)
+        return response["Body"].read()
+    except ClientError as exc:
+        logger.error("s3_download_error", bucket=bucket, key=s3_key, error=str(exc))
+        raise
 
 
 def delete_document_from_s3(bucket: str, s3_key: str) -> None:

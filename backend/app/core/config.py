@@ -37,14 +37,20 @@ class Settings(BaseSettings):
 
     # ── Bedrock ───────────────────────────────────────────────────────────────
     bedrock_claude_model_id: str = "anthropic.claude-3-haiku-20240307-v1:0"
-    bedrock_embed_model_id: str = "amazon.titan-embed-text-v2:0"
+    bedrock_embed_model_id: str = "amazon.titan-embed-g1-text-02"
+
+    # ── Groq ──────────────────────────────────────────────────────────────────
+    groq_secret_arn: str = ""       # ARN of secret containing {"api_key": "gsk_..."}
+    groq_api_key: str = ""          # direct key for local dev (not used in production)
+    groq_chat_model: str = "llama-3.1-8b-instant"
 
     # ── SQS ───────────────────────────────────────────────────────────────────
     ingest_queue_url: str = ""
 
     # ── LLM provider ─────────────────────────────────────────────────────────
-    # "local"  → Ollama (no AWS needed, free, runs on your machine)
-    # "bedrock" → AWS Bedrock (production)
+    # "local"   → Ollama (no AWS needed, free, runs on your machine)
+    # "bedrock" → AWS Bedrock Claude 3 + Titan Embeddings
+    # "groq"    → Groq (chat) + fastembed ONNX (embeddings, local, no throttle)
     llm_provider: str = "local"
 
     # ── Ollama (used when llm_provider=local) ─────────────────────────────────
@@ -58,9 +64,11 @@ class Settings(BaseSettings):
     local_storage_path: str = "./local_data"
 
     # ── Embedding dimension ───────────────────────────────────────────────────
-    # Must match the model: nomic-embed-text=768, Titan Embeddings v2=1536
-    # Set automatically based on provider but can be overridden.
-    embed_dim: int = 768  # 768 for local Ollama; switch to 1536 for Bedrock
+    # Must match the embed model:
+    #   nomic-embed-text (Ollama)          → 768
+    #   bge-small-en-v1.5 (fastembed/groq) → 384
+    #   Titan Embeddings v2 (Bedrock)      → 1536
+    embed_dim: int = 768  # default for local Ollama; overridden by LLM_PROVIDER env var
 
     # ── Rate limits ───────────────────────────────────────────────────────────
     max_requests_per_minute: int = 20

@@ -11,11 +11,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.models.schemas import DocumentSummary, UploadRequest, UploadResponse
 from app.services.storage import (
     delete_document_from_s3,
+    download_from_s3,
     enqueue_etl_job,
     generate_upload_url,
 )
@@ -48,52 +50,71 @@ def request_upload(payload: UploadRequest) -> UploadResponse:
         source_type=payload.source_type,
     )
 
-    # Persist source record so we can track it (even before ETL completes)
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO sources (id, source_type, source_url, consent_flag)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (
-                    document_id,
-                    payload.source_type,
-                    payload.source_url,
-                    payload.consent_given,
-                ),
-            )
-            cur.execute(
-                """
-                INSERT INTO documents (id, source_id, raw_s3_key)
-                VALUES (%s, %s, %s)
-                """,
-                (document_id, document_id, s3_key),
-            )
+    if payload.source_type == "url" and payload.source_url:
+        # For URL sources: fetch the page FIRST (before writing to DB) so that
+        # a bad URL never creates an orphan record.
+        from app.services.local_etl import UrlFetchError, run_local_etl
 
-    # Enqueue ETL job (Glue picks this up in production)
-    enqueue_etl_job(
-        document_id=document_id,
-        s3_key=s3_key,
-        source_type=payload.source_type,
-        consent_flag=payload.consent_given,
-    )
-
-    # In local mode, run ETL in-process immediately for URL sources
-    # (PDF sources go through PUT /documents/local-upload/{id} instead)
-    from app.core.config import get_settings as _get_settings
-    _settings = _get_settings()
-    if _settings.use_local_storage and payload.source_type == "url" and payload.source_url:
-        from app.services.local_etl import run_local_etl
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO sources (id, source_type, source_url, consent_flag)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (document_id, payload.source_type, payload.source_url, payload.consent_given),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO documents (id, source_id, raw_s3_key)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (document_id, document_id, s3_key),
+                    )
+                # ETL runs inside the same connection/transaction.
+                # If it raises, get_db rolls back both INSERTs automatically.
+                run_local_etl(
+                    document_id=document_id,
+                    s3_key=s3_key,
+                    source_type=payload.source_type,
+                    consent_flag=payload.consent_given,
+                    conn=conn,
+                    source_url=str(payload.source_url),
+                )
+        except UrlFetchError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    else:
+        # PDF / email: persist the record, then client PUTs to S3 and calls /process.
         with get_db() as conn:
-            run_local_etl(
-                document_id=document_id,
-                s3_key=s3_key,
-                source_type=payload.source_type,
-                consent_flag=payload.consent_given,
-                conn=conn,
-                source_url=str(payload.source_url),
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sources (id, source_type, source_url, consent_flag)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        document_id,
+                        payload.source_type,
+                        payload.source_url,
+                        payload.consent_given,
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO documents (id, source_id, raw_s3_key)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (document_id, document_id, s3_key),
+                )
+
+        # Enqueue ETL job (Glue picks this up for PDF sources in production)
+        enqueue_etl_job(
+            document_id=document_id,
+            s3_key=s3_key,
+            source_type=payload.source_type,
+            consent_flag=payload.consent_given,
+        )
 
     logger.info("upload_requested", document_id=document_id, source_type=payload.source_type)
     return UploadResponse(
@@ -101,6 +122,61 @@ def request_upload(payload: UploadRequest) -> UploadResponse:
         upload_url=upload_url,
         expires_in_seconds=900,
     )
+
+
+@router.post("/{document_id}/process", status_code=status.HTTP_200_OK)
+def process_document(document_id: str) -> dict:
+    """
+    Step 2 of the upload flow for PDF and email sources.
+    Called by the frontend after its S3 PUT succeeds.
+    Downloads the file from S3, runs the ETL pipeline in-process,
+    and stores chunks + embeddings so the document is immediately searchable.
+    """
+    from app.services.local_etl import run_local_etl
+
+    settings = get_settings()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT d.raw_s3_key, s.source_type, s.consent_flag
+                FROM documents d
+                JOIN sources s ON s.id = d.source_id
+                WHERE d.id = %s
+                """,
+                (document_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    source_type = row["source_type"]
+    s3_key = row["raw_s3_key"]
+    consent_flag = row["consent_flag"]
+
+    if source_type == "url":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL documents are already processed during upload.",
+        )
+
+    bucket = settings.private_bucket if source_type == "email" else settings.public_bucket
+    file_bytes = download_from_s3(bucket, s3_key)
+
+    with get_db() as conn:
+        run_local_etl(
+            document_id=document_id,
+            s3_key=s3_key,
+            source_type=source_type,
+            consent_flag=consent_flag,
+            conn=conn,
+            file_bytes=file_bytes,
+        )
+
+    logger.info("document_processed", document_id=document_id, source_type=source_type)
+    return {"document_id": document_id, "status": "processed"}
 
 
 @router.get("", response_model=list[DocumentSummary])

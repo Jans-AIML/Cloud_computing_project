@@ -46,6 +46,7 @@ def search(
             citation_label=c.get("citation_label"),
             citation_url=c.get("citation_url"),
             topic_tags=c.get("topic_tags") or [],
+            source_type=c.get("source_type"),
         )
         for c in chunks
     ]
