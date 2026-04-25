@@ -34,3 +34,4 @@ Thumbs.db
 htmlcov/
 .coverage
 backend/local_data/
+architecture_viewer.html
