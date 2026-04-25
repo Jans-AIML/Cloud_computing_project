@@ -22,7 +22,7 @@ CEEP does **not** make political decisions. It helps you present facts clearly a
 
 ## Who built it and why?
 
-CEEP was built by Algonquin College students as part of a cloud computing course project.
+CEEP was built by Lambton College students as part of a cloud computing course project.
 It was inspired by the advocacy efforts around Lady Evelyn Alternative School in Old Ottawa East.
 The platform is open-source and free to use and adapt.
 
